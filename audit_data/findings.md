@@ -1,18 +1,29 @@
-### [S-#] TITLE (Root Cause -> Impact)
+# Protocol Summary 
+The ThunderLoan protocol is meant to do the following:
 
-**Description:** 
+1. Give users a way to create flash loans
+2. Give liquidity providers a way to earn money off their capital
 
-**Impact:** 
+Liquidity providers can `deposit` assets into `ThunderLoan` and be given `AssetTokens` in return. These `AssetTokens` gain interest over time depending on how often people take out flash loans!
 
-**Proof of Concept:**
+# Executive Summary
 
-**Recommended Mitigation:** 
+## Issues found
 
+
+| Severity | Number of issues found |
+| -------- | ---------------------- |
+| High     | 3                      |
+| Medium   | 1                      |
+| Low      | 0                      |
+| Info     | 0                      |
+| Total    | 4                      |
+# Findings
 
 
 ## High
 
-### [H-1] Erroneous `ThunderLoan::updateExchangeRate` in the `deposit` function causes protocol to think it has more fees than it really does, which blocks redemption and incorrectly sets the exchange Rate
+### [H-1] The incorrect implementation of `ThunderLoan::updateExchangeRate` in the deposit function leads the protocol to overestimate its fees, resulting in blocked redemptions and an inaccurate exchange rate.
 
 
 **Description:**  In the ThunderLoan system, the `exchangeRate`is responsible for calculating the exchange rate between assetTokens and underlying tokens. In a way, it's  responsible for keeping track of how many fees to give to liquidity providers.
@@ -20,16 +31,16 @@
 However, the  `deposit` function, updates this rate, without collecting any fees!
 
 ```javascript
-    function deposit(IERC20 token, uint256 amount) external revertIfZero(amount) revertIfNotAllowedToken(token) {
+    function deposit(IERC20 token, uint256 amount) external revertIfZero(amount) 
+        revertIfNotAllowedToken(token) {
         AssetToken assetToken = s_tokenToAssetToken[token];
         uint256 exchangeRate = assetToken.getExchangeRate();
         uint256 mintAmount = (amount * assetToken.EXCHANGE_RATE_PRECISION()) / exchangeRate;
         emit Deposit(msg.sender, token, amount);
         assetToken.mint(msg.sender, mintAmount);
-
-        //@audit -high we shouldn't be updating the exchange rate here    
-    @>   uint256 calculatedFee = getCalculatedFee(token, amount);
-    @>   assetToken.updateExchangeRate(calculatedFee);
+  
+    @>  uint256 calculatedFee = getCalculatedFee(token, amount);
+    @>  assetToken.updateExchangeRate(calculatedFee);
 
         token.safeTransferFrom(msg.sender, address(assetToken), amount);
     }
@@ -91,9 +102,9 @@ function testRedeemAfterLoan() public setAllowedToken hasDeposits{
 
 
 
-### [H-2] All the funds can be stolen if the flashloan is returned using deposit()
+### [H-2] All the funds can be stolen if the flashloan is returned using `deposit()`
 
-**Description** The `flashloan` function checks to ensure that ending balance is always greater than the initial balance + fee (for borrowing).But this check is done using token.balanceOf(address(assetToken)).
+**Description:** The `flashloan` function checks to ensure that ending balance is always greater than the initial balance + fee (for borrowing).But this check is done using token.balanceOf(address(assetToken)).
 Exploiting this vulnerability, an attacker can return the flashloan using the `deposit` function instead of `repay` function. This allows the attacker to mint AssetToken and subsequently redeem it using `redeem` function. This will result in  apparent increase in the Asset contract's balance and  the check will pass and the flashloan function doesn't revert.
 
 ```javascript
@@ -101,7 +112,7 @@ Exploiting this vulnerability, an attacker can return the flashloan using the `d
 
 ```
 
-**Impact**  All the funds of the AssetContract can be stolen.
+**Impact:**  All the funds of the AssetContract can be stolen.
 
 
 <details>
@@ -165,7 +176,72 @@ contract  DepositOverRepay is  IFlashLoanReceiver{
 
 </details>
 
-**Recommended Mitigation** Add a check in `deposit` function to make it impossible to use it in the same block of the flash loan. For example registring the block.number in a variable in `flashloan` function and checking it in `deposit` function.
+**Recommended Mitigation:** Add a check in `deposit` function to make it impossible to use it in the same block of the flash loan. For example registering the block.number in a variable in `flashloan` function and checking it in `deposit` function.
+
+### [H-3] Mixing up variable location causes storage collisions in  `ThunderLoan::s_flashLoanFee` and `ThunderLoan::s_currentlyFlashLoaning`, freezing protocol
+
+**Description:** `ThunderLoan.sol` has two variables in the following order:
+
+```javascript 
+    uint256 private s_feePrecision;
+    uint256 private s_flashLoanFee; 
+```
+
+However, the upgraded contract `ThunderLoanUpgraded.sol` has them in a different order:
+
+```javascript
+    uint256 private s_flashLoanFee; 
+    uint256 public constant FEE_PRECISION = 1e18;
+```
+
+Due to how solidity storage works, after the upgrade the `s_flashLoanFee` will have the value of `s_feePrecision`. You cannot adjust the position of storage variables, and removing storage variables for constant variables, breaks the storage location as well.
+
+**Impact:** After the upgrade, the `s_flashLoanFee` will have the value of `s_feePrecision`. This means that users who take out flash loans right after an upgrade will be charged the wrong fee.
+
+More importantly, the `s_currentlyFlashLoaning` mapping with storage in the wrong storage slot.
+
+**Proof of Concept:**
+
+<details>
+<summary>PoC</summary>
+
+Place the following into `ThunderLoanTest.t.sol`. 
+
+```javascript
+import {ThunderLoanUpgraded} from "../../src/upgradedProtocol/ThunderLoanUpgraded.sol";
+.
+.
+.
+function testUpgradeBreaks() public{
+        uint256 feeBeforeUpgrade = thunderLoan.getFee();
+        vm.startPrank(thunderLoan.owner());
+        ThunderLoanUpgraded upgraded = new ThunderLoanUpgraded();
+        thunderLoan.upgradeToAndCall(address(upgraded), "");
+        uint256 feeAfterUpgrade = thunderLoan.getFee();
+        vm.stopPrank();
+
+        console.log("Fee Before:", feeBeforeUpgrade);
+        console.log("Fee After:", feeAfterUpgrade);
+
+        assert(feeBeforeUpgrade != feeAfterUpgrade);
+}
+
+```
+
+You can also see the storage layout difference by running `forge inspect ThunderLoan storage` and `forge inspect ThunderLoanUpgraded storage`
+
+</details>
+
+**Recommended Mitigation:** If you must remove the storage variable, leave it as blank as not to collide with the storage slots.
+
+```diff
+-   uint256 private s_flashLoanFee; 
+-   uint256 public constant FEE_PRECISION = 1e18;
++   uint256 private s_blank;
++   uint256 private s_flashLoanFee;
++   uint256 public constant FREE_PRECISION = 1e18;
+```
+
 
 ## Medium
 
@@ -189,9 +265,8 @@ The following all happens in 1 transaction.
 @>      return ITSwapPool(swapPoolOfToken).getPriceOfOnePoolTokenInWeth();
     }
 ```
-    3. The user then repays the first flash loan, and then repays the second flash loan.
+2. The user then repays the first flash loan, and then repays the second flash loan.
 
-I have created a proof of code located in my `audit-data` folder. It is too large to include here. 
 
-**Recommended Mitigation:** Consider using a different price oracle mechanism, like a Chainlink price feed with a Uniswap TWAP fallback oracle. 
 
+**Recommended Mitigation:** Consider using a manipulation-resistant oracle such as Chainlink.

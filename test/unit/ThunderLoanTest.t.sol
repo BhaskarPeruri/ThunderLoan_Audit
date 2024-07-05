@@ -11,6 +11,7 @@ import{BuffMockPoolFactory} from "../mocks/BuffMockPoolFactory.sol";
 import{BuffMockTSwap} from "../mocks/BuffMockTSwap.sol";
 import { IFlashLoanReceiver, IThunderLoan } from "../../src/interfaces/IFlashLoanReceiver.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ThunderLoanUpgraded} from "../../src/upgradedProtocol/ThunderLoanUpgraded.sol";
 
 contract ThunderLoanTest is BaseTest {
     uint256 constant AMOUNT = 10e18;
@@ -125,6 +126,22 @@ contract ThunderLoanTest is BaseTest {
         console.log("balance of tokenA contract", address(tokenA).balance); //0
         console.log("amount borrowed + fee", 50e18 + fee); //50150000000000000000
         assert(tokenA.balanceOf(address(dor)) > 50e18 + fee);
+    }
+
+    function testUpgradeBreaks() public{
+        uint256 feeBeforeUpgrade = thunderLoan.getFee();
+        vm.startPrank(thunderLoan.owner());
+        ThunderLoanUpgraded upgraded = new ThunderLoanUpgraded();
+        thunderLoan.upgradeToAndCall(address(upgraded), "");
+        uint256 feeAfterUpgrade = thunderLoan.getFee();
+        vm.stopPrank();
+
+        console.log("Fee Before:", feeBeforeUpgrade);
+        console.log("Fee After:", feeAfterUpgrade);
+
+        assert(feeBeforeUpgrade != feeAfterUpgrade);
+
+
     }
 
     function testOracleManipulation() public{
